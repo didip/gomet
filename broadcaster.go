@@ -71,9 +71,6 @@ func (broadcaster *Broadcaster) BroadcastWorker() {
 
 			flusher, ok := bWriter.Writer.(http.Flusher)
 			if ok {
-				// NOTE(Didip): If we spawn more than 1 BroadcastWorker,
-				// we get DATA RACE warning, but it doesn't look harmful.
-				// The payload is fully formed all the way to client.
 				flusher.Flush()
 			}
 
