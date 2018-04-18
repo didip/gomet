@@ -2,7 +2,7 @@ package gomet
 
 import (
 	"encoding/base64"
-	"io"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -18,7 +18,7 @@ type BroadcastWriter struct {
 func NewBroadcaster() *Broadcaster {
 	broadcaster := &Broadcaster{
 		InChan:              make(chan []byte),
-		Writers:             new(sync.Map),
+		WorkerInChans:       new(sync.Map),
 		HTTPResponseHeaders: make(map[string]string),
 	}
 
@@ -27,53 +27,45 @@ func NewBroadcaster() *Broadcaster {
 
 type Broadcaster struct {
 	InChan              chan []byte
-	Writers             *sync.Map
+	WorkerInChans       *sync.Map
 	HTTPResponseHeaders map[string]string
+
+	onFlusherCastError       func()
+	onCloseNotifierCastError func()
 
 	mtx sync.RWMutex
 }
 
-func (broadcaster *Broadcaster) SetHTTPResponseHeaders(headers map[string]string) {
+func (broadcaster *Broadcaster) NewWorkerInChan() (int64, chan []byte) {
+	id := time.Now().UnixNano()
+	inChan := make(chan []byte)
+	broadcaster.WorkerInChans.Store(id, inChan)
+
+	return id, inChan
+}
+
+func (broadcaster *Broadcaster) DeleteWorkerInChan(id int64) {
+	broadcaster.WorkerInChans.Delete(id)
+}
+
+func (broadcaster *Broadcaster) OnFlusherCastError(f func()) {
 	broadcaster.mtx.Lock()
-	for key, value := range headers {
-		broadcaster.HTTPResponseHeaders[key] = value
-	}
+	broadcaster.onFlusherCastError = f
 	broadcaster.mtx.Unlock()
 }
 
-func (broadcaster *Broadcaster) NewBroadcastWriter(w http.ResponseWriter) *BroadcastWriter {
+func (broadcaster *Broadcaster) OnCloseNotifierCastError(f func()) {
 	broadcaster.mtx.Lock()
-	defer broadcaster.mtx.Unlock()
-
-	id := time.Now().UnixNano()
-
-	bWriter := &BroadcastWriter{
-		ID:     id,
-		Writer: w,
-	}
-
-	broadcaster.Writers.Store(bWriter.ID, bWriter)
-
-	return bWriter
+	broadcaster.onCloseNotifierCastError = f
+	broadcaster.mtx.Unlock()
 }
 
-func (broadcaster *Broadcaster) DeleteBroadcastWriter(id int64) {
-	broadcaster.Writers.Delete(id)
-}
-
-func (broadcaster *Broadcaster) BroadcastWorker() {
-	for payloadBytes := range broadcaster.InChan {
-		broadcaster.Writers.Range(func(_, iBWriter interface{}) bool {
-			bWriter := iBWriter.(*BroadcastWriter)
-
-			encodedPayloadString := base64.StdEncoding.EncodeToString(payloadBytes)
-			io.WriteString(bWriter.Writer, encodedPayloadString+"\n")
-
-			flusher, ok := bWriter.Writer.(http.Flusher)
-			if ok {
-				flusher.Flush()
-			}
-
+// Broadcast payload from the main InChan to all of workers' InChan
+func (broadcaster *Broadcaster) Broadcast() {
+	for payload := range broadcaster.InChan {
+		broadcaster.WorkerInChans.Range(func(_, iWorkerInChan interface{}) bool {
+			workerInChan := iWorkerInChan.(chan []byte)
+			workerInChan <- payload
 			return true
 		})
 	}
@@ -89,8 +81,20 @@ func (broadcaster *Broadcaster) HTTPHandler() func(w http.ResponseWriter, r *htt
 		w.Header().Set("Pragma", "no-cache")                                   // HTTP 1.0.
 		w.Header().Set("Expires", "0")                                         // Proxies.
 
-		_, ok := w.(http.Flusher)
+		flusher, ok := w.(http.Flusher)
 		if !ok {
+			if broadcaster.onFlusherCastError != nil {
+				broadcaster.onFlusherCastError()
+			}
+			http.Error(w, `{"Error": "Streaming unsupported"}`, http.StatusInternalServerError)
+			return
+		}
+
+		closeNotifier, ok := w.(http.CloseNotifier)
+		if !ok {
+			if broadcaster.onCloseNotifierCastError != nil {
+				broadcaster.onCloseNotifierCastError()
+			}
 			http.Error(w, `{"Error": "Streaming unsupported"}`, http.StatusInternalServerError)
 			return
 		}
@@ -99,14 +103,20 @@ func (broadcaster *Broadcaster) HTTPHandler() func(w http.ResponseWriter, r *htt
 			w.Header().Set(key, value)
 		}
 
-		bWriter := broadcaster.NewBroadcastWriter(w)
+		workerID, workerInChan := broadcaster.NewWorkerInChan()
 
-		// Detect closed connection from client
-		// When it happened, remove the BroadcastWriter to prevent memory leak
-		notify := w.(http.CloseNotifier).CloseNotify()
-		<-notify
-		if bWriter != nil {
-			broadcaster.DeleteBroadcastWriter(bWriter.ID)
+		for {
+			select {
+			case <-closeNotifier.CloseNotify():
+				broadcaster.DeleteWorkerInChan(workerID)
+				close(workerInChan)
+				return
+
+			case payloadBytes := <-workerInChan:
+				encodedPayloadString := base64.StdEncoding.EncodeToString(payloadBytes)
+				fmt.Fprintf(w, "%s\n", encodedPayloadString)
+				flusher.Flush()
+			}
 		}
 	}
 }

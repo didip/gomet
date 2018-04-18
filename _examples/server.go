@@ -12,15 +12,11 @@ import (
 // curl command to send data:
 // curl -H "Content-Type: application/json" -X POST -d '{"message":"hello world"}' http://localhost:8080/
 func main() {
-	broadcastWorkers := 10
 	broadcastTimeout := 1 * time.Second
 
 	lp := gomet.NewBroadcaster()
 
-	for i := 0; i < broadcastWorkers; i++ {
-		log.Printf("INFO: Running Broadcast Worker(%v)\n", i)
-		go lp.BroadcastWorker()
-	}
+	go lp.Broadcast()
 
 	http.HandleFunc("/stream", lp.HTTPHandler())
 

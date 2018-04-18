@@ -5,6 +5,8 @@
 
 Simple HTTP client & server long poll library for Go.
 
+This library is useful if you cannot use websocket. If you can use websocket, you should use [github.com/gorilla/websocket](https://github.com/gorilla/websocket)
+
 
 ## Five Minute Tutorial
 
@@ -13,6 +15,7 @@ See: https://github.com/didip/gomet/tree/master/_examples
 ```
 cd _examples
 go run server.go &
+go run client.go &
 go run client.go &
 
 curl -H "Content-Type: application/json" -X POST -d '{"message":"hello world"}' http://localhost:8080/

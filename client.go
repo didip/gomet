@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"math/rand"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -16,8 +17,19 @@ func NewClient(url string) (*Client, error) {
 	}
 
 	c := &Client{
-		URL:          url,
-		HTTPClient:   &http.Client{},
+		URL: url,
+		HTTPClient: &http.Client{
+			Timeout: 1 * time.Hour,
+			Transport: &http.Transport{
+				Dial: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 1 * time.Hour,
+				}).Dial,
+				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 0,
+				IdleConnTimeout:       5 * time.Minute,
+			},
+		},
 		HTTPRequest:  req,
 		ResponseChan: make(chan []byte),
 	}
